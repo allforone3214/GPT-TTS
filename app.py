@@ -497,6 +497,11 @@ def show_main_app():
     st.divider()
 
     if generate_btn:
+        # 버튼 비활성화 우회 시도에 대한 서버 측 이중 차단
+        if not api_ready:
+            st.error("⛔ 유효한 OpenAI API 키가 설정되지 않아 API 호출이 차단됩니다.")
+            st.stop()
+
         if not script.strip():
             st.warning("⚠️ 나레이션 대본을 입력해 주세요.")
             st.stop()
