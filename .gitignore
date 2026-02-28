@@ -1,0 +1,18 @@
+# ── Streamlit 시크릿 (절대 커밋 금지) ─────────────────────────────
+.streamlit/secrets.toml
+
+# ── 사용자 데이터 (개인정보 보호) ─────────────────────────────────
+data/pending_users.json
+data/approved_users.json
+
+# ── Python ────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.env
+venv/
+.venv/
+
+# ── OS ────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
