@@ -11,6 +11,7 @@ MAX_LOGIN_ATTEMPTS = 5
 DATA_DIR      = pathlib.Path("data")
 PENDING_FILE  = DATA_DIR / "pending_users.json"
 APPROVED_FILE = DATA_DIR / "approved_users.json"
+ADMIN_CREDS_FILE = DATA_DIR / "admin_credentials.json"  # 앱 내 계정 변경 저장소
 
 MODELS          = ["gpt-4o-mini-tts", "tts-1", "tts-1-hd"]
 VOICES_MINI_TTS = ["cedar", "marin", "alloy", "ash", "ballad", "coral",
@@ -76,6 +77,25 @@ def save_json(path: pathlib.Path, data: list) -> None:
 
 # ── 인증 헬퍼 ─────────────────────────────────────────────────────────────────
 
+def _load_admin_overrides() -> dict:
+    """앱 내에서 변경된 관리자 계정 정보 로드. {username: {name, password}}"""
+    if not ADMIN_CREDS_FILE.exists():
+        return {}
+    try:
+        return json.loads(ADMIN_CREDS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_admin_override(username: str, name: str, pw_hash: str) -> None:
+    DATA_DIR.mkdir(exist_ok=True)
+    overrides = _load_admin_overrides()
+    overrides[username] = {"name": name, "password": pw_hash}
+    ADMIN_CREDS_FILE.write_text(
+        json.dumps(overrides, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
 def _hash_password(password: str) -> str:
     try:
         pepper = st.secrets["auth"]["pepper"]
@@ -93,13 +113,19 @@ def _secrets_users() -> dict:
 
 def verify_login(username: str, password: str) -> tuple[bool, str, bool]:
     """(성공, 표시이름, 관리자여부) 반환."""
-    pw_hash = _hash_password(password)
+    pw_hash   = _hash_password(password)
+    overrides = _load_admin_overrides()
 
-    # 1) secrets.toml 계정 → 관리자
+    # 1) secrets.toml 계정 → 관리자 (앱 내 변경이 있으면 우선 적용)
     sec = _secrets_users()
     if username in sec:
-        if pw_hash == sec[username].get("password", ""):
-            return True, sec[username].get("name", username), True
+        if username in overrides:
+            # 앱 내에서 변경된 비밀번호 사용
+            if pw_hash == overrides[username].get("password", ""):
+                return True, overrides[username].get("name", username), True
+        else:
+            if pw_hash == sec[username].get("password", ""):
+                return True, sec[username].get("name", username), True
         return False, "", False
 
     # 2) approved_users.json → 일반 사용자
@@ -293,8 +319,8 @@ def show_admin_page():
 
     st.divider()
 
-    tab_pending, tab_approved, tab_system = st.tabs(
-        ["🔔 승인 대기", "✅ 승인된 사용자", "👑 시스템 계정"]
+    tab_pending, tab_approved, tab_system, tab_account = st.tabs(
+        ["🔔 승인 대기", "✅ 승인된 사용자", "👑 시스템 계정", "🔧 계정 설정"]
     )
 
     # ── 탭 1: 승인 대기 ───────────────────────────────────────────────────────
@@ -369,6 +395,56 @@ def show_admin_page():
                         save_json(APPROVED_FILE, approved)
                         st.success(f"**{user['name']}** 계정을 삭제했습니다.")
                         st.rerun()
+
+    # ── 탭 4: 계정 설정 ───────────────────────────────────────────────────────
+    with tab_account:
+        cur_username = st.session_state.get("username", "")
+        overrides    = _load_admin_overrides()
+        cur_name     = (overrides.get(cur_username, {}).get("name")
+                        or _secrets_users().get(cur_username, {}).get("name", cur_username))
+
+        st.markdown(f"현재 로그인 계정: **`{cur_username}`** ({cur_name})")
+        st.divider()
+
+        # ── 표시 이름 변경 ────────────────────────────────────────────────────
+        st.subheader("표시 이름 변경")
+        with st.form("form_name"):
+            new_name = st.text_input("새 표시 이름", value=cur_name)
+            if st.form_submit_button("저장", type="primary"):
+                if not new_name.strip():
+                    st.warning("⚠️ 이름을 입력해 주세요.")
+                else:
+                    cur_pw_hash = (overrides.get(cur_username, {}).get("password")
+                                   or _secrets_users().get(cur_username, {}).get("password", ""))
+                    _save_admin_override(cur_username, new_name.strip(), cur_pw_hash)
+                    st.session_state.display_name = new_name.strip()
+                    st.success("✅ 표시 이름이 변경되었습니다.")
+                    st.rerun()
+
+        st.divider()
+
+        # ── 비밀번호 변경 ─────────────────────────────────────────────────────
+        st.subheader("비밀번호 변경")
+        with st.form("form_pw"):
+            cur_pw  = st.text_input("현재 비밀번호", type="password")
+            new_pw  = st.text_input("새 비밀번호 (6자 이상)", type="password")
+            new_pw2 = st.text_input("새 비밀번호 확인", type="password")
+            if st.form_submit_button("변경", type="primary"):
+                if not cur_pw or not new_pw or not new_pw2:
+                    st.warning("⚠️ 모든 항목을 입력해 주세요.")
+                elif len(new_pw) < 6:
+                    st.warning("⚠️ 비밀번호는 6자리 이상이어야 합니다.")
+                elif new_pw != new_pw2:
+                    st.warning("⚠️ 새 비밀번호가 일치하지 않습니다.")
+                else:
+                    ok, _, _ = verify_login(cur_username, cur_pw)
+                    if not ok:
+                        st.error("❌ 현재 비밀번호가 올바르지 않습니다.")
+                    else:
+                        _save_admin_override(
+                            cur_username, cur_name, _hash_password(new_pw)
+                        )
+                        st.success("✅ 비밀번호가 변경되었습니다. 다음 로그인부터 새 비밀번호를 사용하세요.")
 
     # ── 탭 3: 시스템 계정 (secrets.toml) ─────────────────────────────────────
     with tab_system:

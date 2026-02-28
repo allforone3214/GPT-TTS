@@ -4,6 +4,7 @@
 # ── 사용자 데이터 (개인정보 보호) ─────────────────────────────────
 data/pending_users.json
 data/approved_users.json
+data/admin_credentials.json
 
 # ── Python ────────────────────────────────────────────────────────
 __pycache__/
