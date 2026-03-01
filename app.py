@@ -518,16 +518,41 @@ def _pcm_to_wav(pcm_data: bytes, sample_rate: int = 24000) -> io.BytesIO:
     return buf
 
 
+_GEMINI_SPEED_HINTS = {
+    0.50: "Speak very slowly and deliberately.",
+    0.75: "Speak slowly.",
+    1.00: "",
+    1.25: "Speak at a slightly faster pace.",
+    1.50: "Speak quickly.",
+    1.75: "Speak very quickly.",
+    2.00: "Speak extremely fast.",
+}
+
+
+def _gemini_speed_hint(speed: float) -> str:
+    """속도 배율을 가장 가까운 프리셋 힌트 문자열로 변환."""
+    closest = min(_GEMINI_SPEED_HINTS.keys(), key=lambda k: abs(k - speed))
+    return _GEMINI_SPEED_HINTS[closest]
+
+
 def call_gemini_tts(model: str, voice: str, text: str,
-                    style: str, api_key: str) -> io.BytesIO:
+                    style: str, api_key: str,
+                    speed: float = 1.0) -> io.BytesIO:
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=api_key)
 
-    contents = text.strip()
+    parts = []
+    speed_hint = _gemini_speed_hint(speed)
+    if speed_hint:
+        parts.append(speed_hint)
     if style.strip():
-        contents = f"{style.strip()}\n\n{contents}"
+        parts.append(style.strip())
+    if parts:
+        contents = "\n".join(parts) + "\n\n" + text.strip()
+    else:
+        contents = text.strip()
 
     response = client.models.generate_content(
         model=model,
@@ -642,6 +667,8 @@ def show_main_app():
         st.divider()
 
         speed = 1.0
+        gemini_speed = 1.0
+
         if model in ("tts-1", "tts-1-hd"):
             st.subheader("⚡ 음성 속도")
             speed = st.slider(
@@ -660,6 +687,29 @@ def show_main_app():
             elif speed == 1.0:
                 st.caption("▶️ 기본 속도")
             elif speed <= 1.5:
+                st.caption("🏃 빠르게")
+            else:
+                st.caption("⚡ 매우 빠르게")
+            st.divider()
+
+        elif is_gemini:
+            st.subheader("⚡ 음성 속도")
+            gemini_speed = st.slider(
+                "속도 배율",
+                min_value=0.5,
+                max_value=2.0,
+                value=1.0,
+                step=0.25,
+                format="%.2fx",
+                help="스타일 지시로 속도를 제어합니다. 1.0이 기본 속도입니다.",
+            )
+            if gemini_speed <= 0.5:
+                st.caption("🐢 매우 느리게")
+            elif gemini_speed < 1.0:
+                st.caption("🐾 천천히")
+            elif gemini_speed == 1.0:
+                st.caption("▶️ 기본 속도")
+            elif gemini_speed <= 1.5:
                 st.caption("🏃 빠르게")
             else:
                 st.caption("⚡ 매우 빠르게")
@@ -713,10 +763,10 @@ def show_main_app():
                 ),
             )
     elif is_gemini:
-        with st.expander("🎭 스타일 / 감정 지시 (Gemini TTS 전용)", expanded=False):
+        with st.expander("🎭 스타일 / 감정 지시 (Gemini TTS 전용)", expanded=True):
             st.markdown(
-                "음성 스타일·톤·속도·감정 등을 자연어로 지시할 수 있습니다.  \n"
-                "지시 내용은 읽을 텍스트 앞에 자동으로 덧붙여집니다.  \n"
+                "음성 스타일·톤·감정 등을 자연어로 지시할 수 있습니다.  \n"
+                "속도는 사이드바 슬라이더로도 조절됩니다.  \n"
                 "비워두면 기본 스타일로 생성됩니다."
             )
             instructions = st.text_area(
@@ -767,6 +817,7 @@ def show_main_app():
                         text=script,
                         style=instructions,
                         api_key=gemini_api_key,
+                        speed=gemini_speed,
                     )
                     audio_fmt  = "audio/wav"
                     file_name  = "narration.wav"
