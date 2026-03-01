@@ -1,5 +1,6 @@
 import io
 import json
+import wave
 import hashlib
 import pathlib
 import httpx
@@ -13,16 +14,35 @@ PENDING_FILE  = DATA_DIR / "pending_users.json"
 APPROVED_FILE = DATA_DIR / "approved_users.json"
 ADMIN_CREDS_FILE = DATA_DIR / "admin_credentials.json"  # 앱 내 계정 변경 저장소
 
-MODELS          = ["gpt-4o-mini-tts", "tts-1", "tts-1-hd"]
+OPENAI_MODELS   = ["gpt-4o-mini-tts", "tts-1", "tts-1-hd"]
+GEMINI_MODELS   = ["gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"]
+MODELS          = OPENAI_MODELS + GEMINI_MODELS
+
 VOICES_MINI_TTS = ["cedar", "marin", "alloy", "ash", "ballad", "coral",
                    "echo", "fable", "nova", "onyx", "sage", "shimmer", "verse"]
 VOICES_LEGACY   = ["alloy", "ash", "coral", "echo", "fable", "nova", "onyx", "sage", "shimmer"]
+
+VOICES_GEMINI_FEMALE = [
+    "Achernar", "Aoede", "Autonoe", "Callirrhoe", "Despina",
+    "Erinome", "Gacrux", "Kore", "Laomedeia", "Leda",
+    "Pulcherrima", "Sulafat", "Vindemiatrix", "Zephyr",
+]
+VOICES_GEMINI_MALE = [
+    "Achird", "Algenib", "Algieba", "Alnilam", "Charon",
+    "Enceladus", "Fenrir", "Iapetus", "Orus", "Puck",
+    "Rasalgethi", "Sadachbia", "Sadaltager", "Schedar",
+    "Umbriel", "Zubenelgenubi",
+]
+VOICES_GEMINI = sorted(VOICES_GEMINI_FEMALE + VOICES_GEMINI_MALE)
 
 VOICE_GENDER = {
     "cedar": "M", "marin": "F", "alloy": "N", "ash": "M",
     "ballad": "M", "coral": "F", "echo": "M", "fable": "M",
     "nova": "F", "onyx": "M", "sage": "F", "shimmer": "F", "verse": "M",
 }
+GEMINI_VOICE_GENDER = {v: "F" for v in VOICES_GEMINI_FEMALE}
+GEMINI_VOICE_GENDER.update({v: "M" for v in VOICES_GEMINI_MALE})
+
 GENDER_EMOJI = {"M": "👨", "F": "👩", "N": "🧑"}
 GENDER_LABEL = {"M": "남성", "F": "여성", "N": "중성"}
 GENDER_BG    = {"M": "#3A8EDB", "F": "#E8529A", "N": "#F0F0F0"}
@@ -44,9 +64,11 @@ VOICE_DESCRIPTIONS = {
     "verse":   "다재다능하고 표현력 있는 목소리",
 }
 MODEL_DESCRIPTIONS = {
-    "gpt-4o-mini-tts": "최신 · 최고품질 · 말투/감정 지시 가능 (권장)",
-    "tts-1":           "빠른 응답 · 저지연",
-    "tts-1-hd":        "고품질 · 느린 응답",
+    "gpt-4o-mini-tts":          "최신 · 최고품질 · 말투/감정 지시 가능 (권장)",
+    "tts-1":                    "빠른 응답 · 저지연",
+    "tts-1-hd":                 "고품질 · 느린 응답",
+    "gemini-2.5-flash-preview-tts": "Google Gemini · 저지연 · 스타일 지시 가능",
+    "gemini-2.5-pro-preview-tts":   "Google Gemini · 최고품질 · 정교한 스타일 제어",
 }
 
 # ── 페이지 기본 설정 ──────────────────────────────────────────────────────────
@@ -141,6 +163,20 @@ def verify_login(username: str, password: str) -> tuple[bool, str, bool]:
 def get_api_key() -> str:
     try:
         key = str(st.secrets["openai"]["api_key"]).strip()
+    except (KeyError, TypeError):
+        return ""
+    if not key or "REPLACE_WITH" in key:
+        return ""
+    try:
+        key.encode("ascii")
+    except UnicodeEncodeError:
+        return "__INVALID_KEY__"
+    return key
+
+
+def get_gemini_api_key() -> str:
+    try:
+        key = str(st.secrets["google"]["api_key"]).strip()
     except (KeyError, TypeError):
         return ""
     if not key or "REPLACE_WITH" in key:
@@ -468,71 +504,178 @@ def show_admin_page():
                 c2.write(f"`{uname}` 👑")
 
 
+# ── Gemini TTS 호출 ───────────────────────────────────────────────────────────
+
+def _pcm_to_wav(pcm_data: bytes, sample_rate: int = 24000) -> io.BytesIO:
+    """Raw PCM(16-bit mono)을 WAV BytesIO로 변환."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_data)
+    buf.seek(0)
+    return buf
+
+
+def call_gemini_tts(model: str, voice: str, text: str,
+                    style: str, api_key: str) -> io.BytesIO:
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=api_key)
+
+    contents = text.strip()
+    if style.strip():
+        contents = f"{style.strip()}\n\n{contents}"
+
+    response = client.models.generate_content(
+        model=model,
+        contents=contents,
+        config=types.GenerateContentConfig(
+            response_modalities=["AUDIO"],
+            speech_config=types.SpeechConfig(
+                voice_config=types.VoiceConfig(
+                    prebuilt_voice_config=types.PrebuiltVoiceConfig(
+                        voice_name=voice,
+                    )
+                )
+            ),
+        ),
+    )
+
+    pcm_data = response.candidates[0].content.parts[0].inline_data.data
+    return _pcm_to_wav(pcm_data)
+
+
 # ── TTS 메인 앱 ───────────────────────────────────────────────────────────────
 
 def show_main_app():
-    api_key = get_api_key()
+    api_key        = get_api_key()
+    gemini_api_key = get_gemini_api_key()
     _render_sidebar_header()
 
     with st.sidebar:
         st.divider()
 
-        if api_key == "__INVALID_KEY__":
-            st.error(
-                "⛔ **API 키 오류**: secrets.toml의 api_key에 한글 등 "
-                "비ASCII 문자가 포함되어 있습니다.  \n"
-                "실제 OpenAI API 키(`sk-...`)로 교체해 주세요."
-            )
-        elif not api_key:
-            st.warning(
-                "⚠️ **OpenAI API 키 미설정**  \n"
-                "`.streamlit/secrets.toml`의 `api_key` 항목에 "
-                "실제 키(`sk-...`)를 입력하세요."
-            )
-
         st.subheader("🤖 모델 선택")
         model = st.selectbox("TTS 모델", options=MODELS, index=0)
         st.caption(f"ℹ️ {MODEL_DESCRIPTIONS[model]}")
 
+        is_gemini = model in GEMINI_MODELS
+
+        # ── API 키 상태 표시 ───────────────────────────────────────────────────
+        if is_gemini:
+            if gemini_api_key == "__INVALID_KEY__":
+                st.error(
+                    "⛔ **Gemini API 키 오류**: secrets.toml의 google.api_key에 "
+                    "비ASCII 문자가 포함되어 있습니다."
+                )
+            elif not gemini_api_key:
+                st.warning(
+                    "⚠️ **Google API 키 미설정**  \n"
+                    "`.streamlit/secrets.toml`에 아래 항목을 추가하세요.\n\n"
+                    "```toml\n[google]\napi_key = \"AIza...\"\n```"
+                )
+        else:
+            if api_key == "__INVALID_KEY__":
+                st.error(
+                    "⛔ **API 키 오류**: secrets.toml의 api_key에 한글 등 "
+                    "비ASCII 문자가 포함되어 있습니다.  \n"
+                    "실제 OpenAI API 키(`sk-...`)로 교체해 주세요."
+                )
+            elif not api_key:
+                st.warning(
+                    "⚠️ **OpenAI API 키 미설정**  \n"
+                    "`.streamlit/secrets.toml`의 `api_key` 항목에 "
+                    "실제 키(`sk-...`)를 입력하세요."
+                )
+
         st.divider()
 
+        # ── 음성 선택 ─────────────────────────────────────────────────────────
         st.subheader("🎤 음성 선택")
-        if model == "gpt-4o-mini-tts":
+
+        if is_gemini:
+            available_voices = VOICES_GEMINI
+            voice_help        = "30가지 Gemini 전용 음성 (알파벳 순)"
+            voice = st.selectbox(
+                "Voice",
+                options=available_voices,
+                format_func=lambda v: f"{GENDER_EMOJI[GEMINI_VOICE_GENDER[v]]} {v}",
+                help=voice_help,
+            )
+            g = GEMINI_VOICE_GENDER[voice]
+        elif model == "gpt-4o-mini-tts":
             available_voices = VOICES_MINI_TTS
-            voice_help = "cedar / marin이 최고 품질로 권장됩니다."
+            voice_help        = "cedar / marin이 최고 품질로 권장됩니다."
+            voice = st.selectbox(
+                "Voice",
+                options=available_voices,
+                format_func=lambda v: f"{GENDER_EMOJI[VOICE_GENDER[v]]} {v}",
+                help=voice_help,
+            )
+            g = VOICE_GENDER[voice]
         else:
             available_voices = VOICES_LEGACY
-            voice_help = f"{model} 지원 음성 9종"
+            voice_help        = f"{model} 지원 음성 9종"
+            voice = st.selectbox(
+                "Voice",
+                options=available_voices,
+                format_func=lambda v: f"{GENDER_EMOJI[VOICE_GENDER[v]]} {v}",
+                help=voice_help,
+            )
+            g = VOICE_GENDER[voice]
 
-        voice = st.selectbox(
-            "Voice",
-            options=available_voices,
-            format_func=lambda v: f"{GENDER_EMOJI[VOICE_GENDER[v]]} {v}",
-            help=voice_help,
-        )
-
-        g     = VOICE_GENDER[voice]
         badge = (
             f'<span style="background:{GENDER_BG[g]};color:{GENDER_FG[g]};'
             f'padding:2px 10px;border-radius:20px;font-size:12px;font-weight:600;">'
             f'{GENDER_EMOJI[g]} {GENDER_LABEL[g]}</span>'
         )
+        desc = VOICE_DESCRIPTIONS.get(voice, "")
         st.markdown(
-            f'{badge} &nbsp;<span style="font-size:13px;color:#888;">'
-            f'{VOICE_DESCRIPTIONS.get(voice, "")}</span>',
+            f'{badge}'
+            + (f' &nbsp;<span style="font-size:13px;color:#888;">{desc}</span>' if desc else ""),
             unsafe_allow_html=True,
         )
 
         st.divider()
+
+        speed = 1.0
+        if model in ("tts-1", "tts-1-hd"):
+            st.subheader("⚡ 음성 속도")
+            speed = st.slider(
+                "속도 배율",
+                min_value=0.25,
+                max_value=4.0,
+                value=1.0,
+                step=0.05,
+                format="%.2fx",
+                help="1.0이 기본 속도입니다. 0.25(매우 느림) ~ 4.0(매우 빠름)",
+            )
+            if speed < 0.75:
+                st.caption("🐢 매우 느리게")
+            elif speed < 1.0:
+                st.caption("🐾 천천히")
+            elif speed == 1.0:
+                st.caption("▶️ 기본 속도")
+            elif speed <= 1.5:
+                st.caption("🏃 빠르게")
+            else:
+                st.caption("⚡ 매우 빠르게")
+            st.divider()
+
         st.caption("API 키는 서버에서만 사용되며 외부에 노출되지 않습니다.")
 
     # ── 메인 영역 ─────────────────────────────────────────────────────────────
-    st.title("🎙️ OpenAI TTS 나레이션 생성기")
+    st.title("🎙️ TTS 나레이션 생성기")
     st.markdown(
-        "텍스트 대본을 입력하고 **음성 생성** 버튼을 누르면 OpenAI TTS API로 음성을 만들어 드립니다.  \n"
-        "생성된 음성은 바로 들어보거나 **MP3 파일로 다운로드**할 수 있습니다."
+        "텍스트 대본을 입력하고 **음성 생성** 버튼을 누르면 선택한 모델로 음성을 만들어 드립니다.  \n"
+        "생성된 음성은 바로 들어보거나 **파일로 다운로드**할 수 있습니다."
     )
     st.divider()
+
+    MAX_CHARS = 4096
 
     script = st.text_area(
         "📝 나레이션 대본",
@@ -541,8 +684,16 @@ def show_main_app():
             "여기에 음성으로 변환할 텍스트를 입력하세요.\n\n"
             "예) 안녕하세요. 오늘은 인공지능 음성 합성 기술에 대해 알아보겠습니다."
         ),
-        help="OpenAI TTS는 한국어를 포함한 다국어를 지원합니다.",
+        help="한국어를 포함한 다국어를 지원합니다.",
     )
+
+    char_count = len(script)
+    if char_count > MAX_CHARS:
+        st.error(f"⛔ 텍스트가 너무 깁니다: **{char_count:,} / {MAX_CHARS:,}자** — {char_count - MAX_CHARS:,}자를 줄여 주세요.")
+    elif char_count > MAX_CHARS * 0.9:
+        st.warning(f"⚠️ 글자 수: **{char_count:,} / {MAX_CHARS:,}자** — 제한에 근접하고 있습니다.")
+    else:
+        st.caption(f"글자 수: {char_count:,} / {MAX_CHARS:,}")
 
     instructions = ""
     if model == "gpt-4o-mini-tts":
@@ -561,10 +712,31 @@ def show_main_app():
                     "- Whisper softly with a calm and soothing voice."
                 ),
             )
+    elif is_gemini:
+        with st.expander("🎭 스타일 / 감정 지시 (Gemini TTS 전용)", expanded=False):
+            st.markdown(
+                "음성 스타일·톤·속도·감정 등을 자연어로 지시할 수 있습니다.  \n"
+                "지시 내용은 읽을 텍스트 앞에 자동으로 덧붙여집니다.  \n"
+                "비워두면 기본 스타일로 생성됩니다."
+            )
+            instructions = st.text_area(
+                "스타일 지시 (영문 권장)",
+                height=100,
+                placeholder=(
+                    "예시:\n"
+                    "- Speak in a warm and friendly tone, like a podcast host.\n"
+                    "- Read the following in a calm, professional news anchor style.\n"
+                    "- Use an upbeat and energetic delivery."
+                ),
+            )
 
     col_btn, _ = st.columns([1, 5])
     with col_btn:
-        api_ready   = bool(api_key) and api_key != "__INVALID_KEY__"
+        if is_gemini:
+            api_ready = bool(gemini_api_key) and gemini_api_key != "__INVALID_KEY__"
+        else:
+            api_ready = bool(api_key) and api_key != "__INVALID_KEY__"
+
         generate_btn = st.button(
             "🔊 음성 생성", type="primary",
             use_container_width=True, disabled=not api_ready,
@@ -573,63 +745,84 @@ def show_main_app():
     st.divider()
 
     if generate_btn:
-        # 버튼 비활성화 우회 시도에 대한 서버 측 이중 차단
         if not api_ready:
-            st.error("⛔ 유효한 OpenAI API 키가 설정되지 않아 API 호출이 차단됩니다.")
+            provider = "Google" if is_gemini else "OpenAI"
+            st.error(f"⛔ 유효한 {provider} API 키가 설정되지 않아 API 호출이 차단됩니다.")
             st.stop()
 
         if not script.strip():
             st.warning("⚠️ 나레이션 대본을 입력해 주세요.")
             st.stop()
 
+        if len(script) > MAX_CHARS:
+            st.error(f"⛔ 텍스트가 {MAX_CHARS:,}자를 초과합니다. ({len(script):,}자) 내용을 줄인 뒤 다시 시도해 주세요.")
+            st.stop()
+
         try:
             with st.spinner("🎵 음성을 생성하는 중입니다... 잠시만 기다려 주세요."):
-                payload: dict = {"model": model, "voice": voice, "input": script.strip()}
-                if model == "gpt-4o-mini-tts" and instructions.strip():
-                    payload["instructions"] = instructions.strip()
-
-                body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-
-                with httpx.Client(timeout=120.0) as client:
-                    resp = client.post(
-                        "https://api.openai.com/v1/audio/speech",
-                        headers={
-                            "Authorization": f"Bearer {api_key}",
-                            "Content-Type": "application/json; charset=utf-8",
-                        },
-                        content=body_bytes,
+                if is_gemini:
+                    audio_buffer = call_gemini_tts(
+                        model=model,
+                        voice=voice,
+                        text=script,
+                        style=instructions,
+                        api_key=gemini_api_key,
                     )
+                    audio_fmt  = "audio/wav"
+                    file_name  = "narration.wav"
+                    mime_type  = "audio/wav"
+                else:
+                    payload: dict = {"model": model, "voice": voice, "input": script.strip()}
+                    if model == "gpt-4o-mini-tts" and instructions.strip():
+                        payload["instructions"] = instructions.strip()
+                    if model in ("tts-1", "tts-1-hd") and speed != 1.0:
+                        payload["speed"] = speed
 
-                if resp.status_code == 401:
-                    st.error("❌ **API 키 인증 실패**: secrets.toml의 OpenAI API 키를 확인해 주세요.")
-                    st.stop()
-                elif resp.status_code == 429:
-                    st.error("❌ **크레딧 한도 초과**: OpenAI 계정의 결제 정보 및 사용량을 확인해 주세요.")
-                    st.stop()
-                elif resp.status_code != 200:
-                    err_msg = resp.json().get("error", {}).get("message", "알 수 없는 오류")
-                    st.error(f"❌ **API 오류 ({resp.status_code})**: {err_msg}")
-                    st.stop()
+                    body_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
 
-                audio_buffer = io.BytesIO(resp.content)
-                audio_buffer.seek(0)
+                    with httpx.Client(timeout=120.0) as http_client:
+                        resp = http_client.post(
+                            "https://api.openai.com/v1/audio/speech",
+                            headers={
+                                "Authorization": f"Bearer {api_key}",
+                                "Content-Type": "application/json; charset=utf-8",
+                            },
+                            content=body_bytes,
+                        )
+
+                    if resp.status_code == 401:
+                        st.error("❌ **API 키 인증 실패**: secrets.toml의 OpenAI API 키를 확인해 주세요.")
+                        st.stop()
+                    elif resp.status_code == 429:
+                        st.error("❌ **크레딧 한도 초과**: OpenAI 계정의 결제 정보 및 사용량을 확인해 주세요.")
+                        st.stop()
+                    elif resp.status_code != 200:
+                        err_msg = resp.json().get("error", {}).get("message", "알 수 없는 오류")
+                        st.error(f"❌ **API 오류 ({resp.status_code})**: {err_msg}")
+                        st.stop()
+
+                    audio_buffer = io.BytesIO(resp.content)
+                    audio_buffer.seek(0)
+                    audio_fmt = "audio/mp3"
+                    file_name = "narration.mp3"
+                    mime_type = "audio/mpeg"
 
             st.success("✅ 음성 생성이 완료되었습니다!")
             st.subheader("🎧 미리 듣기")
-            st.audio(audio_buffer, format="audio/mp3")
+            st.audio(audio_buffer, format=audio_fmt)
 
             audio_buffer.seek(0)
             st.download_button(
-                label="⬇️ MP3 파일 다운로드",
+                label=f"⬇️ {file_name.split('.')[-1].upper()} 파일 다운로드",
                 data=audio_buffer,
-                file_name="narration.mp3",
-                mime="audio/mpeg",
+                file_name=file_name,
+                mime=mime_type,
                 type="secondary",
             )
 
         except httpx.ConnectError:
             st.error(
-                "❌ **연결 오류**: OpenAI 서버에 접속하지 못했습니다.  \n"
+                "❌ **연결 오류**: API 서버에 접속하지 못했습니다.  \n"
                 "인터넷 연결 상태를 확인하고 잠시 후 다시 시도해 주세요."
             )
         except httpx.TimeoutException:
